@@ -11,6 +11,7 @@ use app\models\Counters;
 use app\models\ServiceUser;
 use app\models\Queues;
 use app\modules\equeue\models\Service;
+use app\models\CounterCalls; // Added this model
 
 class NextController extends Controller
 {
@@ -19,8 +20,6 @@ class NextController extends Controller
      */
     public function behaviors()
     {
-        // Disable CSRF validation for this controller's actions
-        // as it's likely called via AJAX/API.
         return [
             'csrf' => [
                 'class' => \yii\web\Request::class,
@@ -30,7 +29,7 @@ class NextController extends Controller
     }
 
     /**
-     * Calls the next person in the queue.
+     * Calls the next person in the queue based on service priority.
      * This is an API endpoint for bank operators.
      * @return array JSON response
      */
@@ -38,39 +37,33 @@ class NextController extends Controller
     {
         Yii::$app->response->format = Response::FORMAT_JSON;
 
+        $transaction = Yii::$app->db->beginTransaction(Transaction::REPEATABLE_READ);
+
         try {
             $userId = Yii::$app->user->id;
             $user = Users::getUserData($userId);
-
             if (!$user) {
-                // Return an error if the user is not found
-                return ['success' => false, 'message' => 'Foydalanuvchi topilmadi'];
+                throw new \yii\web\NotFoundHttpException('Foydalanuvchi topilmadi.');
             }
 
-            // 1. More efficient and cleaner counter selection
+            // 1. Determine the counter for this user
             $requestedCounterId = Yii::$app->request->post('counter_id', Yii::$app->request->get('counter_id'));
-
-            $counterQuery = Counters::find()
-                ->where([
-                    'branch_id' => $user->branch_id,
-                    'user_id'   => $user->id,
-                    'status'    => 'active',
-                ]);
-
+            $counterQuery = Counters::find()->where([
+                'branch_id' => $user->branch_id,
+                'user_id'   => $user->id,
+                'status'    => 'active',
+            ]);
             if ($requestedCounterId) {
                 $counterQuery->andWhere(['id' => $requestedCounterId]);
             }
-
-            $chosenCounter = $counterQuery->one(); // Fetching one record is more efficient
+            $chosenCounter = $counterQuery->one();
 
             if (!$chosenCounter) {
-                $message = $requestedCounterId
-                    ? 'Ushbu counter sizga tegishli emas yoki faol emas' // This counter does not belong to you or is not active
-                    : 'Faol counterlar topilmadi'; // Active counters not found
+                $message = $requestedCounterId ? 'Ushbu counter sizga tegishli emas yoki faol emas' : 'Faol counterlar topilmadi';
                 return ['success' => false, 'message' => $message];
             }
 
-            // 2. Get user's services
+            // 2. Get services this user can perform
             $serviceIds = ServiceUser::find()
                 ->select('service_id')
                 ->where(['user_id' => $user->id])
@@ -80,97 +73,74 @@ class NextController extends Controller
                 return ['success' => false, 'message' => 'Foydalanuvchiga biriktirilgan xizmatlar topilmadi'];
             }
 
-            // 3. Find and update the next queue within a transaction
-            $nextQueueData = null;
+            // 3. Find the highest priority person in the queue
+            $query = Queues::find()
+                ->alias('q')
+                ->innerJoin(['s' => Service::tableName()], 's.id = q.service_id')
+                ->where([
+                    'q.branch_id' => $user->branch_id,
+                    'q.status'    => Queues::STATUS_WAITING,
+                ])
+                ->andWhere(['in', 'q.service_id', $serviceIds])
+                ->orderBy([
+                    's.priority'   => SORT_DESC,
+                    'q.created_at' => SORT_ASC,
+                    'q.id'         => SORT_ASC,
+                ]);
 
-            // Using REPEATABLE READ is often a better balance of performance and safety for this use case.
-            $transaction = Yii::$app->db->beginTransaction(Transaction::REPEATABLE_READ);
-
-            try {
-                $supportsForUpdate = in_array(Yii::$app->db->driverName, ['mysql', 'pgsql']);
-
-                // The main query to find the next person in the queue
-                $query = Queues::find()
-                    ->alias('q')
-                    // Note: The original code had a comment here. Please verify this model's namespace and table name.
-                    ->innerJoin(['s' => \app\modules\equeue\models\Service::tableName()], 's.id = q.service_id')
-                    ->where([
-                        'q.branch_id' => $user->branch_id,
-                        'q.status'    => Queues::STATUS_WAITING,
-                    ])
-                    ->andWhere(['q.counter_id' => null])
-                    ->andWhere(['in', 'q.service_id', $serviceIds]) // Using 'in' is more explicit and readable
-                    ->orderBy([
-                        's.priority'   => SORT_DESC,
-                        'q.created_at' => SORT_ASC,
-                        'q.id'         => SORT_ASC,
-                    ]);
-
-                // 4. Use pessimistic locking ('FOR UPDATE') to prevent race conditions
-                if ($supportsForUpdate) {
-                    $query->limit(1)->forUpdate();
-                }
-
-                $nextQueue = $query->one();
-
-                if ($nextQueue) {
-                    // 5. Update the queue record
-                    $nextQueue->status     = Queues::STATUS_CALLED;
-                    // Use a DB expression for the current time to avoid server timezone issues
-                    $nextQueue->called_at  = new \yii\db\Expression('NOW()');
-                    $nextQueue->counter_id = $chosenCounter->id;
-
-                    if ($nextQueue->save()) {
-                        $transaction->commit();
-
-                        // 6. Prepare the successful response
-                        $nextQueueData = [
-                            'success'     => true,
-                            'nextNumber'  => $nextQueue->queue_number,
-                            'message'     => "Navbat raqami chaqirildi: {$nextQueue->queue_number}",
-                            'counter_id'  => $chosenCounter->id,
-                            'service_id'  => $nextQueue->service_id,
-                            'queue_id'    => $nextQueue->id,
-                        ];
-                    } else {
-                        $transaction->rollBack();
-                        // Return validation errors for easier debugging
-                        return [
-                            'success' => false,
-                            'message' => 'Maʼlumotni yangilashda xatolik yuz berdi',
-                            'errors'  => $nextQueue->errors,
-                        ];
-                    }
-                } else {
-                    // No one is waiting in the queue
-                    $transaction->rollBack();
-                }
-
-            } catch (\Throwable $e) {
-                if ($transaction->isActive) {
-                    $transaction->rollBack();
-                }
-                // Re-throw the exception to be caught by the outer catch block for logging
-                throw $e;
+            // 4. Lock the row to prevent race conditions (backward-compatible)
+            $nextQueue = null;
+            $supportsForUpdate = in_array(Yii::$app->db->driverName, ['mysql', 'pgsql']);
+            if ($supportsForUpdate) {
+                $rawSql = $query->limit(1)->createCommand()->getRawSql();
+                $nextQueue = Queues::findBySql($rawSql . ' FOR UPDATE')->one();
+            } else {
+                $nextQueue = $query->limit(1)->one();
             }
 
-            if ($nextQueueData) {
-                return $nextQueueData;
-            } else {
+            if (!$nextQueue) {
+                $transaction->rollBack();
                 return ['success' => false, 'message' => 'Mos kutayotgan navbat topilmadi'];
             }
 
-        } catch (\Throwable $e) {
-            Yii::error([
-                'msg'   => 'actionCallNext failed',
-                'error' => $e->getMessage(),
-                'file'  => $e->getFile(),
-                'line'  => $e->getLine(),
-            ], __METHOD__);
+            // 5. Update queue status and create a counter_calls record
+            $now = new \yii\db\Expression('NOW()');
+
+            $nextQueue->status = Queues::STATUS_CALLED;
+            $nextQueue->called_at = $now;
+
+            if (!$nextQueue->save()) {
+                throw new \yii\base\Exception('Navbat holatini yangilab bo‘lmadi.');
+            }
+
+            $counterCall = new CounterCalls();
+            $counterCall->counter_id = $chosenCounter->id;
+            $counterCall->queue_id = $nextQueue->id;
+            $counterCall->branch_id = $user->branch_id;
+            $counterCall->called_at = $now;
+
+            if (!$counterCall->save()) {
+                throw new \yii\base\Exception('Chaqiruvni qayd etib bo‘lmadi.');
+            }
+
+            $transaction->commit();
 
             return [
+                'success'     => true,
+                'nextNumber'  => $nextQueue->queue_number,
+                'message'     => "Navbat raqami chaqirildi: {$nextQueue->queue_number}",
+                'counter_id'  => $chosenCounter->id,
+                'queue_id'    => $nextQueue->id,
+            ];
+
+        } catch (\Throwable $e) {
+            if ($transaction->isActive) {
+                $transaction->rollBack();
+            }
+            Yii::error($e->getMessage(), __METHOD__);
+            return [
                 'success' => false,
-                'message' => YII_DEBUG ? 'Xatolik: ' . $e->getMessage() : 'Kutilmagan xatolik yuz berdi',
+                'message' => YII_DEBUG ? $e->getMessage() : 'Kutilmagan xatolik yuz berdi.',
             ];
         }
     }
