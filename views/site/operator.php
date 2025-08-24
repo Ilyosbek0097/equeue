@@ -207,13 +207,15 @@ const QueueOperator = {
     showMessage: function(type, text) {
         const alertClass = type === 'success' ? 'alert-success' : (type === 'danger' ? 'alert-danger' : 'alert-info');
         const icon = type === 'success' ? 'bx-check-circle' : (type === 'danger' ? 'bx-error-circle' : 'bx-info-circle');
-        const alertHtml = `
-            <div class="alert ${alertClass} alert-dismissible fade show" role="alert">
-                <i class="bx ${icon} me-2"></i>
-                ${text}
-                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
-            </div>
-        `;
+
+        // Using string concatenation to avoid PHP parsing issues with `${...}` syntax in heredoc strings.
+        const alertHtml =
+            '<div class="alert ' + alertClass + ' alert-dismissible fade show" role="alert">' +
+                '<i class="bx ' + icon + ' me-2"></i>' +
+                text +
+                '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>' +
+            '</div>';
+
         this.elements.messageArea.html(alertHtml);
     },
 
