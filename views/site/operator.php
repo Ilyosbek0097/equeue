@@ -126,7 +126,12 @@ const QueueOperator = {
             updateStatus: '$updateStatusUrl'
         },
         csrf: $('meta[name="csrf-token"]').attr('content'),
-        counterId: '$counterOne->id'
+        counterId: '$counterOne->id',
+        initialState: <?= $activeCall ? json_encode([
+            'queue_id' => $activeCall->queue_id,
+            'service_id' => $activeCall->queue->service_id,
+            'nextNumber' => $activeCall->queue->queue_number,
+        ]) : 'null' ?>
     },
 
     // UI Elements
@@ -150,7 +155,13 @@ const QueueOperator = {
     // Initialization
     init: function() {
         this.bindEvents();
-        this.setState('idle');
+        if (this.config.initialState) {
+            this.updateDisplay(this.config.initialState);
+            this.setState('active');
+            this.showMessage('info', 'Sizda yakunlanmagan faol navbat mavjud.');
+        } else {
+            this.setState('idle');
+        }
     },
 
     bindEvents: function() {
