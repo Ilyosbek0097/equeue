@@ -6,6 +6,11 @@ use yii\helpers\Url;
 
 $this->title = 'Operator Oynasi';
 $this->params['breadcrumbs'][] = $this->title;
+
+// Defensive check to prevent "Undefined variable" error if controller doesn't pass $activeCall.
+if (!isset($activeCall)) {
+    $activeCall = null;
+}
 ?>
 
 <div class="queue-operator-pwa">
