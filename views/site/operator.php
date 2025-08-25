@@ -11,6 +11,7 @@ $this->params['breadcrumbs'][] = $this->title;
 if (!isset($activeCall)) {
     $activeCall = null;
 }
+
 ?>
 
 <div class="queue-operator-pwa">
@@ -24,7 +25,7 @@ if (!isset($activeCall)) {
                     <span class="badge bg-success rounded-pill">Faol</span>
                 </div>
                 <div class="card-body">
-                    <ul class="list-unstyled">
+                     <ul class="list-unstyled">
                         <li class="d-flex justify-content-between mb-2">
                             <span class="text-muted">Xodim:</span>
                             <span class="fw-semibold"><?= Html::encode($counterOne->user->username ?? 'N/A') ?></span>
@@ -38,6 +39,12 @@ if (!isset($activeCall)) {
                             <span class="fw-semibold"><?= Html::encode($counterOne->name ?? 'N/A') ?></span>
                         </li>
                     </ul>
+                    <hr>
+                    <div class="d-grid">
+                        <button id="history-btn" class="btn btn-outline-secondary">
+                            <i class="bx bx-history me-1"></i> Bugungi Tarix
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -118,26 +125,61 @@ if (!isset($activeCall)) {
     </div>
 </div>
 
-<?php
-$callNextUrl = Url::to(['/equeue/api/call-next']); // Assuming a dedicated API controller
-$updateStatusUrl = Url::to(['/equeue/api/update-status']); // Assuming a dedicated API controller
+<!-- History Modal -->
+<div class="modal fade" id="historyModal" tabindex="-1" aria-labelledby="historyModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="historyModalLabel"><i class="bx bx-history me-2"></i>Bugungi Xizmat Ko'rsatilgan Navbatlar</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="text-center my-5 d-none" id="history-loader">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Yuklanmoqda...</span>
+            </div>
+        </div>
+        <table class="table table-striped d-none" id="history-table">
+          <thead>
+            <tr>
+              <th>Navbat №</th>
+              <th>Xizmat Nomi</th>
+              <th>Chaqirildi</th>
+              <th>Yakunlandi</th>
+            </tr>
+          </thead>
+          <tbody id="history-table-body">
+            <!-- Data will be populated here by JavaScript -->
+          </tbody>
+        </table>
+        <p class="text-center text-muted my-5 d-none" id="no-history-message">Bugun hali hech kimga xizmat ko'rsatilmagan.</p>
+      </div>
+    </div>
+  </div>
+</div>
 
+
+<?php
+$config = [
+    'urls' => [
+        'callNext' => Url::to(['/equeue/next/call-next']),
+        'updateStatus' => Url::to(['/equeue/next/update-status']),
+        'todaysHistory' => Url::to(['/equeue/next/todays-history']), // New URL
+    ],
+    'csrf' => Yii::$app->request->getCsrfToken(),
+    'counterId' => $counterOne->id ?? 0,
+    'initialState' => ($activeCall && $activeCall->queue) ? [
+        'queue_id'   => $activeCall->queue_id,
+        'service_id' => $activeCall->queue->service_id,
+        'nextNumber' => $activeCall->queue->queue_number,
+    ] : null,
+];
+
+$this->registerJs('window.QueueConfig = ' . yii\helpers\Json::htmlEncode($config) . ';', \yii\web\View::POS_HEAD);
 $js = <<<JS
 const QueueOperator = {
     // Configuration
-    config: {
-        urls: {
-            callNext: '$callNextUrl',
-            updateStatus: '$updateStatusUrl'
-        },
-        csrf: $('meta[name="csrf-token"]').attr('content'),
-        counterId: '<?= $counterOne->id ?? '' ?>',
-        initialState: <?= ($activeCall && $activeCall->queue) ? json_encode([
-            'queue_id' => $activeCall->queue_id,
-            'service_id' => $activeCall->queue->service_id,
-            'nextNumber' => $activeCall->queue->queue_number,
-        ]) : 'null' ?>
-    },
+    config: window.QueueConfig,
 
     // UI Elements
     elements: {
@@ -147,7 +189,13 @@ const QueueOperator = {
         messageArea: $('#message-area'),
         currentNumber: $('#current-number'),
         currentService: $('#current-service'),
-        actionButtons: $('#active-view .action-buttons button')
+        actionButtons: $('#active-view .action-buttons button'),
+        historyBtn: $('#history-btn'),
+        historyModal: new bootstrap.Modal(document.getElementById('historyModal')),
+        historyTable: $('#history-table'),
+        historyTableBody: $('#history-table-body'),
+        historyLoader: $('#history-loader'),
+        noHistoryMessage: $('#no-history-message')
     },
 
     // State
@@ -175,6 +223,7 @@ const QueueOperator = {
             const status = $(e.currentTarget).data('status');
             this.handleUpdateStatus(status);
         });
+        this.elements.historyBtn.on('click', () => this.handleShowHistory());
     },
 
     // State Machine
@@ -224,8 +273,7 @@ const QueueOperator = {
         const alertClass = type === 'success' ? 'alert-success' : (type === 'danger' ? 'alert-danger' : 'alert-info');
         const icon = type === 'success' ? 'bx-check-circle' : (type === 'danger' ? 'bx-error-circle' : 'bx-info-circle');
 
-        // Using string concatenation to avoid PHP parsing issues with `${...}` syntax in heredoc strings.
-        const alertHtml =
+        var alertHtml =
             '<div class="alert ' + alertClass + ' alert-dismissible fade show" role="alert">' +
                 '<i class="bx ' + icon + ' me-2"></i>' +
                 text +
@@ -268,8 +316,7 @@ const QueueOperator = {
 
     handleUpdateStatus: function(status) {
         if (status === 'recall') {
-            this.showMessage('info', `Navbat #${this.elements.currentNumber.text()} qayta chaqirildi.`);
-            // In a real app, you would trigger a sound or a visual flash here.
+            this.showMessage('info', 'Navbat #' + this.elements.currentNumber.text() + ' qayta chaqirildi.');
             return;
         }
 
@@ -294,6 +341,40 @@ const QueueOperator = {
             error: () => {
                 this.showMessage('danger', 'Server bilan bog‘lanishda xatolik yuz berdi.');
             }
+        });
+    },
+
+    handleShowHistory: function() {
+        this.elements.historyLoader.removeClass('d-none');
+        this.elements.historyTable.addClass('d-none');
+        this.elements.historyTableBody.empty();
+        this.elements.noHistoryMessage.addClass('d-none');
+        this.elements.historyModal.show();
+
+        $.ajax({
+            url: this.config.urls.todaysHistory,
+            method: 'GET',
+            success: function(response) {
+                this.elements.historyLoader.addClass('d-none');
+                if (response && response.success && response.history.length > 0) {
+                    this.elements.historyTable.removeClass('d-none');
+                    response.history.forEach(function(item) {
+                        var row = '<tr>' +
+                            '<td><strong>' + item.queue_number + '</strong></td>' +
+                            '<td>' + item.service_name + '</td>' +
+                            '<td>' + item.called_at + '</td>' +
+                            '<td>' + item.served_at + '</td>' +
+                            '</tr>';
+                        this.elements.historyTableBody.append(row);
+                    }.bind(this));
+                } else {
+                    this.elements.noHistoryMessage.removeClass('d-none');
+                }
+            }.bind(this),
+            error: function() {
+                this.elements.historyLoader.addClass('d-none');
+                this.elements.noHistoryMessage.text('Tarixni yuklashda xatolik yuz berdi.').removeClass('d-none');
+            }.bind(this)
         });
     }
 };
