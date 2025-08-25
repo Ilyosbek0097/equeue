@@ -15,7 +15,7 @@ use app\modules\equeue\models\CounterCalls;
 
 class NextController extends Controller
 {
-    public $enableCsrfValidation = false; // Simple way to disable for all actions in this API controller
+    public $enableCsrfValidation = false;
 
     public function behaviors()
     {
@@ -29,58 +29,38 @@ class NextController extends Controller
         ];
     }
 
-    /**
-     * Calls the next person in the queue or returns the current active queue.
-     */
     public function actionCallNext()
     {
         $userId = Yii::$app->user->id;
         $user = Users::getUserData($userId);
-        if (!$user) {
-            throw new \yii\web\NotFoundHttpException('Foydalanuvchi topilmadi.');
-        }
+        if (!$user) { throw new \yii\web\NotFoundHttpException('Foydalanuvchi topilmadi.'); }
 
-        // First, check if this operator already has an active, unfinished queue
         $activeCall = CounterCalls::find()
             ->alias('cc')
-            ->innerJoinWith('queue q', false) // Use `false` for lazy load, relation is enough
+            ->innerJoinWith('queue q', false)
             ->where(['cc.user_id' => $userId, 'q.status' => Queues::STATUS_CALLED])
             ->one();
 
         if ($activeCall) {
-            return [
-                'success' => true,
-                'already_active' => true,
-                'message' => 'Sizda allaqachon faol navbat mavjud: ' . $activeCall->queue->queue_number,
-                'nextNumber' => $activeCall->queue->queue_number,
-                'queue_id' => $activeCall->queue_id,
-                'service_id' => $activeCall->queue->service_id,
-            ];
+            return ['success' => true, 'already_active' => true, 'message' => 'Sizda allaqachon faol navbat mavjud: ' . $activeCall->queue->queue_number, 'nextNumber' => $activeCall->queue->queue_number, 'queue_id' => $activeCall->queue_id, 'service_id' => $activeCall->queue->service_id];
         }
 
         $transaction = Yii::$app->db->beginTransaction(Transaction::REPEATABLE_READ);
         try {
-            // Determine the counter
             $chosenCounter = Counters::find()->where(['user_id' => $userId, 'status' => 'active'])->one();
-            if (!$chosenCounter) {
-                throw new \yii\web\HttpException(403, 'Sizga biriktirilgan faol oyna topilmadi.');
-            }
+            if (!$chosenCounter) { throw new \yii\web\HttpException(403, 'Sizga biriktirilgan faol oyna topilmadi.'); }
 
-            // Get services this user can perform
             $serviceIds = ServiceUser::find()->select('service_id')->where(['user_id' => $user->id])->column();
-            if (empty($serviceIds)) {
-                throw new \yii\web\HttpException(403, 'Foydalanuvchiga biriktirilgan xizmatlar topilmadi.');
-            }
+            if (empty($serviceIds)) { throw new \yii\web\HttpException(403, 'Foydalanuvchiga biriktirilgan xizmatlar topilmadi.'); }
 
-            // Find the highest priority person in the queue
             $query = Queues::find()
                 ->alias('q')
                 ->innerJoinWith('service s', false)
                 ->where(['q.branch_id' => $user->branch_id, 'q.status' => Queues::STATUS_WAITING])
                 ->andWhere(['in', 'q.service_id', $serviceIds])
-                ->orderBy(['s.priority' => SORT_DESC, 'q.created_at' => SORT_ASC, 'q.id' => SORT_ASC]);
+                // UPDATED: Prioritize by `preference` column first
+                ->orderBy(['q.preference' => SORT_DESC, 's.priority' => SORT_DESC, 'q.created_at' => SORT_ASC, 'q.id' => SORT_ASC]);
 
-            // Lock the row to prevent race conditions
             $rawSql = $query->limit(1)->createCommand()->getRawSql();
             $nextQueue = Queues::findBySql($rawSql . ' FOR UPDATE')->one();
 
@@ -89,34 +69,22 @@ class NextController extends Controller
                 return ['success' => false, 'message' => 'Mos kutayotgan navbat topilmadi'];
             }
 
-            // Update queue status and create a counter_calls record
             $now = new \yii\db\Expression('NOW()');
             $nextQueue->status = Queues::STATUS_CALLED;
             $nextQueue->called_at = $now;
-            if (!$nextQueue->save()) {
-                throw new \yii\base\Exception('Navbat holatini yangilab bo‘lmadi: ' . json_encode($nextQueue->errors));
-            }
+            if (!$nextQueue->save()) { throw new \yii\base\Exception('Navbat holatini yangilab bo‘lmadi: ' . json_encode($nextQueue->errors)); }
 
             $counterCall = new CounterCalls();
-            $counterCall->user_id = $userId; // Save the user_id
+            $counterCall->user_id = $userId;
             $counterCall->counter_id = $chosenCounter->id;
             $counterCall->queue_id = $nextQueue->id;
             $counterCall->branch_id = $user->branch_id;
             $counterCall->called_at = $now;
-            if (!$counterCall->save()) {
-                throw new \yii\base\Exception('Chaqiruvni qayd etib bo‘lmadi: ' . json_encode($counterCall->errors));
-            }
+            if (!$counterCall->save()) { throw new \yii\base\Exception('Chaqiruvni qayd etib bo‘lmadi: ' . json_encode($counterCall->errors)); }
 
             $transaction->commit();
 
-            return [
-                'success' => true,
-                'already_active' => false,
-                'nextNumber' => $nextQueue->queue_number,
-                'message' => "Navbat raqami chaqirildi: {$nextQueue->queue_number}",
-                'queue_id' => $nextQueue->id,
-                'service_id' => $nextQueue->service_id,
-            ];
+            return ['success' => true, 'already_active' => false, 'nextNumber' => $nextQueue->queue_number, 'message' => "Navbat raqami chaqirildi: {$nextQueue->queue_number}", 'queue_id' => $nextQueue->id, 'service_id' => $nextQueue->service_id];
 
         } catch (\Throwable $e) {
             if ($transaction->isActive) $transaction->rollBack();
@@ -125,31 +93,21 @@ class NextController extends Controller
         }
     }
 
-    /**
-     * Updates the status of an active queue (e.g., to 'served' or 'cancelled').
-     */
     public function actionUpdateStatus()
     {
         $userId = Yii::$app->user->id;
         $queue_id = (int)Yii::$app->request->post('queue_id');
         $status = Yii::$app->request->post('status');
 
-        if (!$queue_id || !in_array($status, ['served', 'cancelled'])) {
-            throw new \yii\web\BadRequestHttpException('Kerakli parametrlar noto‘g‘ri yoki mavjud emas.');
-        }
+        if (!$queue_id || !in_array($status, ['served', 'cancelled'])) { throw new \yii\web\BadRequestHttpException('Kerakli parametrlar noto‘g‘ri yoki mavjud emas.'); }
 
         $transaction = Yii::$app->db->beginTransaction();
         try {
-            // Find the call record assigned to this user
             $call = CounterCalls::find()->where(['queue_id' => $queue_id, 'user_id' => $userId])->one();
-            if (!$call) {
-                throw new \yii\web\NotFoundHttpException('Bu navbat sizga biriktirilmagan yoki topilmadi.');
-            }
+            if (!$call) { throw new \yii\web\NotFoundHttpException('Bu navbat sizga biriktirilmagan yoki topilmadi.'); }
 
-            $queue = $call->getQueue()->one(); // Use relation to get queue
-            if ($queue->status !== Queues::STATUS_CALLED) {
-                 throw new \yii\web\ConflictHttpException('Ushbu navbatning holatini o\'zgartirib bo\'lmaydi.');
-            }
+            $queue = $call->getQueue()->one();
+            if ($queue->status !== Queues::STATUS_CALLED) { throw new \yii\web\ConflictHttpException('Ushbu navbatning holatini o\'zgartirib bo\'lmaydi.'); }
 
             if ($status === 'served') {
                 $queue->status = Queues::STATUS_SERVED;
@@ -158,12 +116,8 @@ class NextController extends Controller
                 $queue->status = Queues::STATUS_CANCELLED;
             }
 
-            if (!$queue->save()) {
-                 throw new \yii\base\Exception('Navbat holatini saqlashda xatolik: ' . json_encode($queue->errors));
-            }
-            if (!$call->save()) {
-                 throw new \yii\base\Exception('Chaqiruv holatini saqlashda xatolik: ' . json_encode($call->errors));
-            }
+            if (!$queue->save()) { throw new \yii\base\Exception('Navbat holatini saqlashda xatolik: ' . json_encode($queue->errors)); }
+            if (!$call->save()) { throw new \yii\base\Exception('Chaqiruv holatini saqlashda xatolik: ' . json_encode($call->errors)); }
 
             $transaction->commit();
             return ['success' => true, 'message' => 'Status muvaffaqiyatli yangilandi.'];
@@ -176,48 +130,92 @@ class NextController extends Controller
     }
 
     /**
-     * Fetches waiting queues that the current operator can serve.
+     * NEW: Redirects a queue to a new service.
      */
+    public function actionRedirectQueue()
+    {
+        $userId = Yii::$app->user->id;
+        $queue_id = (int)Yii::$app->request->post('queue_id');
+        $target_service_id = (int)Yii::$app->request->post('target_service_id');
+
+        if (!$queue_id || !$target_service_id) {
+            throw new \yii\web\BadRequestHttpException('Required parameters are missing.');
+        }
+
+        $transaction = Yii::$app->db->beginTransaction();
+        try {
+            // 1. Find and close the original call/queue
+            $originalCall = CounterCalls::find()->where(['queue_id' => $queue_id, 'user_id' => $userId])->one();
+            if (!$originalCall) {
+                throw new \yii\web\NotFoundHttpException('The queue to redirect was not found or not assigned to you.');
+            }
+
+            $originalQueue = $originalCall->getQueue()->one();
+            if ($originalQueue->status !== Queues::STATUS_CALLED) {
+                throw new \yii\web\ConflictHttpException('Only a currently called queue can be redirected.');
+            }
+
+            $originalQueue->status = Queues::STATUS_SERVED; // Mark as served for this part of the process
+            $originalCall->served_at = new \yii\db\Expression('NOW()');
+
+            if (!$originalQueue->save() || !$originalCall->save()) {
+                throw new \yii\base\Exception('Could not close the original queue before redirecting.');
+            }
+
+            // 2. Create a new queue for the target service
+            $newQueue = new Queues();
+            $newQueue->branch_id = $originalQueue->branch_id;
+            $newQueue->service_id = $target_service_id;
+            $newQueue->queue_number = $originalQueue->queue_number; // Use the same number
+            $newQueue->status = Queues::STATUS_WAITING;
+            $newQueue->created_at = new \yii\db\Expression('NOW()');
+            $newQueue->preference = 99; // Set high preference to be called next
+
+            if (!$newQueue->save()) {
+                throw new \yii\base\Exception('Could not create the new redirected queue: ' . json_encode($newQueue->errors));
+            }
+
+            $transaction->commit();
+            return ['success' => true, 'message' => 'Navbat ' . $newQueue->queue_number . ' muvaffaqiyatli yo\'naltirildi.'];
+
+        } catch (\Throwable $e) {
+            if ($transaction->isActive) $transaction->rollBack();
+            Yii::error($e->getMessage(), __METHOD__);
+            return ['success' => false, 'message' => YII_DEBUG ? $e->getMessage() : 'Navbatni yo\'naltirishda xatolik yuz berdi.'];
+        }
+    }
+
+    public function actionTodaysHistory()
+    {
+        $userId = Yii::$app->user->id;
+        $todayStart = date('Y-m-d 00:00:00');
+        $servedCalls = CounterCalls::find()->with('queue.service')->where(['user_id' => $userId])->andWhere(['is not', 'served_at', null])->andWhere(['>=', 'served_at', $todayStart])->orderBy(['served_at' => SORT_DESC])->all();
+        $history = [];
+        if (!empty($servedCalls)) {
+            foreach ($servedCalls as $call) {
+                if ($call->queue && $call->queue->service) {
+                    $history[] = ['queue_number' => $call->queue->queue_number, 'service_name' => $call->queue->service->name, 'called_at' => Yii::$app->formatter->asTime($call->called_at, 'php:H:i:s'), 'served_at' => Yii::$app->formatter->asTime($call->served_at, 'php:H:i:s')];
+                }
+            }
+        }
+        return ['success' => true, 'history' => $history];
+    }
+
     public function actionWaitingQueues()
     {
         $userId = Yii::$app->user->id;
-        $user = \app\modules\equeue\models\Users::getUserData($userId);
-
-        // Step 1: Get the list of services this user can handle
-        $serviceIds = \app\modules\equeue\models\ServiceUser::find()
-            ->select('service_id')
-            ->where(['user_id' => $user->id])
-            ->column();
-
-        if (empty($serviceIds)) {
-            // If the user has no services, they can't see any waiting queues for them.
-            return ['success' => true, 'list' => []];
-        }
-
-        // Step 2: Find waiting queues for those specific services
-        $waitingQueues = \app\modules\equeue\models\Queues::find()
-            ->with('service') // Eager load service data
-            ->where([
-                'branch_id' => $user->branch_id,
-                'status' => \app\modules\equeue\models\Queues::STATUS_WAITING
-            ])
-            ->andWhere(['in', 'service_id', $serviceIds]) // Filter by operator's services
-            ->orderBy(['created_at' => SORT_ASC])
-            ->all();
-
+        $user = Users::getUserData($userId);
+        $serviceIds = ServiceUser::find()->select('service_id')->where(['user_id' => $user->id])->column();
+        if (empty($serviceIds)) { return ['success' => true, 'list' => []]; }
+        $waitingQueues = Queues::find()->with('service')->where(['branch_id' => $user->branch_id, 'status' => Queues::STATUS_WAITING])->andWhere(['in', 'service_id', $serviceIds])->orderBy(['created_at' => SORT_ASC])->all();
         $list = [];
         if (!empty($waitingQueues)) {
             foreach ($waitingQueues as $queue) {
                 if ($queue->service) {
-                    $list[] = [
-                        'queue_number' => $queue->queue_number,
-                        'service_name' => $queue->service->name,
-                        'created_at' => Yii::$app->formatter->asTime($queue->created_at, 'php:H:i:s'),
-                    ];
+                    $list[] = ['queue_number' => $queue->queue_number, 'service_name' => $queue->service->name, 'created_at' => Yii::$app->formatter->asTime($queue->created_at, 'php:H:i:s')];
                 }
             }
         }
-
         return ['success' => true, 'list' => $list];
     }
 }
