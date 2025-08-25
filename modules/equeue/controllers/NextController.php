@@ -174,4 +174,50 @@ class NextController extends Controller
             return ['success' => false, 'message' => YII_DEBUG ? $e->getMessage() : 'Statusni yangilashda xatolik yuz berdi.'];
         }
     }
+
+    /**
+     * Fetches waiting queues that the current operator can serve.
+     */
+    public function actionWaitingQueues()
+    {
+        $userId = Yii::$app->user->id;
+        $user = \app\modules\equeue\models\Users::getUserData($userId);
+
+        // Step 1: Get the list of services this user can handle
+        $serviceIds = \app\modules\equeue\models\ServiceUser::find()
+            ->select('service_id')
+            ->where(['user_id' => $user->id])
+            ->column();
+
+        if (empty($serviceIds)) {
+            // If the user has no services, they can't see any waiting queues for them.
+            return ['success' => true, 'list' => []];
+        }
+
+        // Step 2: Find waiting queues for those specific services
+        $waitingQueues = \app\modules\equeue\models\Queues::find()
+            ->with('service') // Eager load service data
+            ->where([
+                'branch_id' => $user->branch_id,
+                'status' => \app\modules\equeue\models\Queues::STATUS_WAITING
+            ])
+            ->andWhere(['in', 'service_id', $serviceIds]) // Filter by operator's services
+            ->orderBy(['created_at' => SORT_ASC])
+            ->all();
+
+        $list = [];
+        if (!empty($waitingQueues)) {
+            foreach ($waitingQueues as $queue) {
+                if ($queue->service) {
+                    $list[] = [
+                        'queue_number' => $queue->queue_number,
+                        'service_name' => $queue->service->name,
+                        'created_at' => Yii::$app->formatter->asTime($queue->created_at, 'php:H:i:s'),
+                    ];
+                }
+            }
+        }
+
+        return ['success' => true, 'list' => $list];
+    }
 }

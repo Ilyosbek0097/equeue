@@ -40,9 +40,12 @@ if (!isset($activeCall)) {
                         </li>
                     </ul>
                     <hr>
-                    <div class="d-grid">
+                    <div class="d-grid gap-2">
                         <button id="history-btn" class="btn btn-outline-secondary">
                             <i class="bx bx-history me-1"></i> Bugungi Tarix
+                        </button>
+                        <button id="waiting-list-btn" class="btn btn-outline-info">
+                            <i class="bx bx-list-ul me-1"></i> Kutayotganlar Ro'yxati
                         </button>
                     </div>
                 </div>
@@ -135,24 +138,35 @@ if (!isset($activeCall)) {
       </div>
       <div class="modal-body">
         <div class="text-center my-5 d-none" id="history-loader">
-            <div class="spinner-border text-primary" role="status">
-                <span class="visually-hidden">Yuklanmoqda...</span>
-            </div>
+            <div class="spinner-border text-primary" role="status"><span class="visually-hidden">Yuklanmoqda...</span></div>
         </div>
         <table class="table table-striped d-none" id="history-table">
-          <thead>
-            <tr>
-              <th>Navbat №</th>
-              <th>Xizmat Nomi</th>
-              <th>Chaqirildi</th>
-              <th>Yakunlandi</th>
-            </tr>
-          </thead>
-          <tbody id="history-table-body">
-            <!-- Data will be populated here by JavaScript -->
-          </tbody>
+          <thead><tr><th>Navbat №</th><th>Xizmat Nomi</th><th>Chaqirildi</th><th>Yakunlandi</th></tr></thead>
+          <tbody id="history-table-body"></tbody>
         </table>
         <p class="text-center text-muted my-5 d-none" id="no-history-message">Bugun hali hech kimga xizmat ko'rsatilmagan.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Waiting List Modal -->
+<div class="modal fade" id="waitingListModal" tabindex="-1" aria-labelledby="waitingListModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="waitingListModalLabel"><i class="bx bx-time-five me-2"></i>Hozir Kutayotgan Navbatlar</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="text-center my-5 d-none" id="waiting-list-loader">
+            <div class="spinner-border text-info" role="status"><span class="visually-hidden">Yuklanmoqda...</span></div>
+        </div>
+        <table class="table table-hover d-none" id="waiting-list-table">
+          <thead><tr><th>Navbat №</th><th>Xizmat Nomi</th><th>Kelgan Vaqti</th></tr></thead>
+          <tbody id="waiting-list-table-body"></tbody>
+        </table>
+        <p class="text-center text-muted my-5 d-none" id="no-waiting-list-message">Hozirda kutayotgan navbatlar mavjud emas.</p>
       </div>
     </div>
   </div>
@@ -164,7 +178,8 @@ $config = [
     'urls' => [
         'callNext' => Url::to(['/equeue/next/call-next']),
         'updateStatus' => Url::to(['/equeue/next/update-status']),
-        'todaysHistory' => Url::to(['/equeue/next/todays-history']), // New URL
+        'todaysHistory' => Url::to(['/equeue/next/todays-history']),
+        'waitingQueues' => Url::to(['/equeue/next/waiting-queues']), // New URL
     ],
     'csrf' => Yii::$app->request->getCsrfToken(),
     'counterId' => $counterOne->id ?? 0,
@@ -195,17 +210,18 @@ const QueueOperator = {
         historyTable: $('#history-table'),
         historyTableBody: $('#history-table-body'),
         historyLoader: $('#history-loader'),
-        noHistoryMessage: $('#no-history-message')
+        noHistoryMessage: $('#no-history-message'),
+        waitingListBtn: $('#waiting-list-btn'),
+        waitingListModal: new bootstrap.Modal(document.getElementById('waitingListModal')),
+        waitingListTable: $('#waiting-list-table'),
+        waitingListTableBody: $('#waiting-list-table-body'),
+        waitingListLoader: $('#waiting-list-loader'),
+        noWaitingListMessage: $('#no-waiting-list-message'),
     },
 
-    // State
-    state: {
-        lastQueueId: null,
-        lastServiceId: null,
-        isBusy: false
-    },
+    // ... (State and Init are the same)
+    state: { lastQueueId: null, lastServiceId: null, isBusy: false },
 
-    // Initialization
     init: function() {
         this.bindEvents();
         if (this.config.initialState) {
@@ -219,24 +235,20 @@ const QueueOperator = {
 
     bindEvents: function() {
         this.elements.callNextBtn.on('click', () => this.handleCallNext());
-        this.elements.actionButtons.on('click', (e) => {
-            const status = $(e.currentTarget).data('status');
-            this.handleUpdateStatus(status);
-        });
+        this.elements.actionButtons.on('click', (e) => this.handleUpdateStatus($(e.currentTarget).data('status')));
         this.elements.historyBtn.on('click', () => this.handleShowHistory());
+        this.elements.waitingListBtn.on('click', () => this.handleShowWaitingList());
     },
 
-    // State Machine
+    // ... (setState, updateDisplay, showMessage, clearMessage, handleCallNext, handleUpdateStatus are the same)
     setState: function(newState) {
         const { idleView, activeView, callNextBtn } = this.elements;
         const callNextBtnSpinner = callNextBtn.find('.spinner-border');
         const callNextBtnLabel = callNextBtn.find('.label');
-
         this.state.isBusy = (newState === 'loading');
         callNextBtn.prop('disabled', this.state.isBusy || newState === 'active');
         callNextBtnSpinner.toggleClass('d-none', !this.state.isBusy);
         callNextBtnLabel.text(this.state.isBusy ? 'Kuting...' : 'Keyingi Navbat');
-
         if (newState === 'idle') {
             idleView.removeClass('d-none');
             activeView.addClass('d-none');
@@ -247,52 +259,31 @@ const QueueOperator = {
             activeView.removeClass('d-none');
         }
     },
-
-    // UI Updates
     updateDisplay: function(data) {
         this.state.lastQueueId = data.queue_id || null;
         this.state.lastServiceId = data.service_id || null;
-
         this.elements.currentNumber.text(data.nextNumber || '---');
-
         if (this.state.lastServiceId) {
             const serviceItem = $('#service-item-' + this.state.lastServiceId);
             this.elements.currentService.text('Xizmat: ' + (serviceItem.data('name') || 'Noma\'lum'));
-
             const badge = $('#count-service-' + this.state.lastServiceId);
             const currentCount = parseInt(badge.text() || '0', 10);
-            if (currentCount > 0) {
-                badge.text(currentCount - 1);
-            }
+            if (currentCount > 0) badge.text(currentCount - 1);
         } else {
             this.elements.currentService.text('---');
         }
     },
-
     showMessage: function(type, text) {
         const alertClass = type === 'success' ? 'alert-success' : (type === 'danger' ? 'alert-danger' : 'alert-info');
         const icon = type === 'success' ? 'bx-check-circle' : (type === 'danger' ? 'bx-error-circle' : 'bx-info-circle');
-
-        var alertHtml =
-            '<div class="alert ' + alertClass + ' alert-dismissible fade show" role="alert">' +
-                '<i class="bx ' + icon + ' me-2"></i>' +
-                text +
-                '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>' +
-            '</div>';
-
+        var alertHtml = '<div class="alert ' + alertClass + ' alert-dismissible fade show" role="alert">' + '<i class="bx ' + icon + ' me-2"></i>' + text + '<button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>' + '</div>';
         this.elements.messageArea.html(alertHtml);
     },
-
-    clearMessage: function() {
-        this.elements.messageArea.html('');
-    },
-
-    // Event Handlers
+    clearMessage: function() { this.elements.messageArea.html(''); },
     handleCallNext: function() {
         if (this.state.isBusy) return;
         this.setState('loading');
         this.clearMessage();
-
         $.ajax({
             url: this.config.urls.callNext,
             method: 'POST',
@@ -313,23 +304,16 @@ const QueueOperator = {
             }
         });
     },
-
     handleUpdateStatus: function(status) {
         if (status === 'recall') {
             this.showMessage('info', 'Navbat #' + this.elements.currentNumber.text() + ' qayta chaqirildi.');
             return;
         }
-
         this.clearMessage();
-
         $.ajax({
             url: this.config.urls.updateStatus,
             method: 'POST',
-            data: {
-                _csrf: this.config.csrf,
-                queue_id: this.state.lastQueueId,
-                status: status
-            },
+            data: { _csrf: this.config.csrf, queue_id: this.state.lastQueueId, status: status },
             success: (response) => {
                 if (response && response.success) {
                     this.showMessage('success', response.message);
@@ -338,9 +322,7 @@ const QueueOperator = {
                     this.showMessage('danger', response.message || 'Statusni yangilashda xatolik.');
                 }
             },
-            error: () => {
-                this.showMessage('danger', 'Server bilan bog‘lanishda xatolik yuz berdi.');
-            }
+            error: () => { this.showMessage('danger', 'Server bilan bog‘lanishda xatolik yuz berdi.'); }
         });
     },
 
@@ -350,7 +332,6 @@ const QueueOperator = {
         this.elements.historyTableBody.empty();
         this.elements.noHistoryMessage.addClass('d-none');
         this.elements.historyModal.show();
-
         $.ajax({
             url: this.config.urls.todaysHistory,
             method: 'GET',
@@ -359,12 +340,7 @@ const QueueOperator = {
                 if (response && response.success && response.history.length > 0) {
                     this.elements.historyTable.removeClass('d-none');
                     response.history.forEach(function(item) {
-                        var row = '<tr>' +
-                            '<td><strong>' + item.queue_number + '</strong></td>' +
-                            '<td>' + item.service_name + '</td>' +
-                            '<td>' + item.called_at + '</td>' +
-                            '<td>' + item.served_at + '</td>' +
-                            '</tr>';
+                        var row = '<tr>' + '<td><strong>' + item.queue_number + '</strong></td>' + '<td>' + item.service_name + '</td>' + '<td>' + item.called_at + '</td>' + '<td>' + item.served_at + '</td>' + '</tr>';
                         this.elements.historyTableBody.append(row);
                     }.bind(this));
                 } else {
@@ -374,6 +350,35 @@ const QueueOperator = {
             error: function() {
                 this.elements.historyLoader.addClass('d-none');
                 this.elements.noHistoryMessage.text('Tarixni yuklashda xatolik yuz berdi.').removeClass('d-none');
+            }.bind(this)
+        });
+    },
+
+    // New function for waiting list
+    handleShowWaitingList: function() {
+        this.elements.waitingListLoader.removeClass('d-none');
+        this.elements.waitingListTable.addClass('d-none');
+        this.elements.waitingListTableBody.empty();
+        this.elements.noWaitingListMessage.addClass('d-none');
+        this.elements.waitingListModal.show();
+        $.ajax({
+            url: this.config.urls.waitingQueues,
+            method: 'GET',
+            success: function(response) {
+                this.elements.waitingListLoader.addClass('d-none');
+                if (response && response.success && response.list.length > 0) {
+                    this.elements.waitingListTable.removeClass('d-none');
+                    response.list.forEach(function(item) {
+                        var row = '<tr>' + '<td><strong>' + item.queue_number + '</strong></td>' + '<td>' + item.service_name + '</td>' + '<td>' + item.created_at + '</td>' + '</tr>';
+                        this.elements.waitingListTableBody.append(row);
+                    }.bind(this));
+                } else {
+                    this.elements.noWaitingListMessage.removeClass('d-none');
+                }
+            }.bind(this),
+            error: function() {
+                this.elements.waitingListLoader.addClass('d-none');
+                this.elements.noWaitingListMessage.text('Kutayotganlar ro\'yxatini yuklashda xatolik yuz berdi.').removeClass('d-none');
             }.bind(this)
         });
     }
