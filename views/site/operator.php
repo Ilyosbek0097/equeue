@@ -131,8 +131,8 @@ const QueueOperator = {
             updateStatus: '$updateStatusUrl'
         },
         csrf: $('meta[name="csrf-token"]').attr('content'),
-        counterId: '$counterOne->id',
-        initialState: <?= $activeCall ? json_encode([
+        counterId: '<?= $counterOne->id ?? '' ?>',
+        initialState: <?= ($activeCall && $activeCall->queue) ? json_encode([
             'queue_id' => $activeCall->queue_id,
             'service_id' => $activeCall->queue->service_id,
             'nextNumber' => $activeCall->queue->queue_number,
